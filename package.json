@@ -1,0 +1,17 @@
+{
+  "name": "r007us3r-website",
+  "version": "1.0.0",
+  "description": "r007us3r personal website with secure YouTube API integration",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "keywords": [
+    "youtube",
+    "api",
+    "serverless",
+    "vercel"
+  ],
+  "author": "r007us3r",
+  "license": "MIT"
+}
