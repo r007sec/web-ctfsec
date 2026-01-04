@@ -8,10 +8,20 @@
 let cache = {
   channelData: null,
   videos: null,
+  playlists: {},
   timestamp: null
 };
 
 const CACHE_DURATION = 600000; // 10 minutes in milliseconds
+
+// Your playlist IDs
+const PLAYLISTS = {
+  'ad': 'PL-KySkbfyS663cCQlYn_ow4cHo62ZKlCC',
+  'thm': 'PL-KySkbfyS64f7dhGoKMKP0YIT7H2tqpn',
+  'htb': 'PL-KySkbfyS66qoidtOTfRzdWCZNngoT47',
+  'ctf': 'PL-KySkbfyS64iVfW6xleDT18KTnifZAaM',
+  'cloud': 'PL-KySkbfyS64iVfW6xleDT18KTnifZAaM'
+};
 
 function isCacheValid() {
   if (!cache.timestamp) return false;
@@ -42,25 +52,72 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Server configuration error' });
     }
 
-    // Check if we have valid cached data
-    if (isCacheValid() && cache.channelData && cache.videos) {
-      console.log('✅ Returning cached data');
+    // Check if specific playlist is requested
+    const { playlist } = req.query;
+
+    // If specific playlist requested and cached, return it
+    if (playlist && cache.playlists[playlist] && isCacheValid()) {
+      console.log(`✅ Returning cached playlist: ${playlist}`);
+      return res.status(200).json({
+        success: true,
+        cached: true,
+        data: {
+          playlistId: playlist,
+          videos: cache.playlists[playlist]
+        }
+      });
+    }
+
+    // Check if we have valid cached data for channel stats
+    if (!playlist && isCacheValid() && cache.channelData && cache.videos) {
+      console.log('✅ Returning cached channel data');
       return res.status(200).json({
         success: true,
         cached: true,
         data: {
           channelStats: cache.channelData,
-          videos: cache.videos
+          videos: cache.videos,
+          playlists: cache.playlists
         }
       });
     }
 
     console.log('🔄 Fetching fresh data from YouTube API...');
 
-    // STEP 1: Get channel statistics AND uploads playlist ID
-    // This is ONE API call (1 quota unit) that gives us both stats and the uploads playlist
     const CHANNEL_ID = 'UCMq4uUwcWnYgfe3z5w3Kt7A';
-    
+    let quotaUsed = 0;
+
+    // If specific playlist requested, fetch only that
+    if (playlist) {
+      const playlistId = PLAYLISTS[playlist];
+      if (!playlistId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Invalid playlist name' 
+        });
+      }
+
+      console.log(`🔄 Fetching playlist: ${playlist} (${playlistId})`);
+      const playlistVideos = await fetchPlaylistVideos(API_KEY, playlistId);
+      quotaUsed = playlistVideos.quotaUsed;
+      
+      // Cache this playlist
+      cache.playlists[playlist] = playlistVideos.videos;
+      if (!cache.timestamp) cache.timestamp = Date.now();
+
+      return res.status(200).json({
+        success: true,
+        cached: false,
+        quotaUsed,
+        data: {
+          playlistId: playlist,
+          videos: playlistVideos.videos
+        }
+      });
+    }
+
+    // Otherwise, fetch channel stats and all uploads
+    // STEP 1: Get channel statistics AND uploads playlist ID
     const channelResponse = await fetch(
       `https://www.googleapis.com/youtube/v3/channels?part=statistics,contentDetails,snippet&id=${CHANNEL_ID}&key=${API_KEY}`
     );
@@ -72,6 +129,7 @@ export default async function handler(req, res) {
     }
 
     const channelData = await channelResponse.json();
+    quotaUsed += 1;
     
     if (!channelData.items || channelData.items.length === 0) {
       throw new Error('Channel not found');
@@ -96,52 +154,22 @@ export default async function handler(req, res) {
     console.log(`📊 Channel Stats: ${channelStats.subscribers} subs, ${channelStats.videoCount} videos`);
 
     // STEP 2: Fetch videos from the uploads playlist
-    // Using playlistItems.list costs only 1 quota unit (vs 100 for search.list)
-    let allVideos = [];
-    let nextPageToken = '';
-    let pageCount = 0;
+    const uploadsResult = await fetchPlaylistVideos(API_KEY, uploadsPlaylistId);
+    quotaUsed += uploadsResult.quotaUsed;
+    const allVideos = uploadsResult.videos;
 
-    do {
-      const playlistUrl = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&playlistId=${uploadsPlaylistId}&maxResults=50&pageToken=${nextPageToken}&key=${API_KEY}`;
-      
-      const playlistResponse = await fetch(playlistUrl);
-      
-      if (!playlistResponse.ok) {
-        const errorText = await playlistResponse.text();
-        console.error('❌ Playlist API error:', playlistResponse.status, errorText);
-        throw new Error(`YouTube API error: ${playlistResponse.status}`);
-      }
+    console.log(`✅ Fetched ${allVideos.length} videos`);
 
-      const playlistData = await playlistResponse.json();
-      
-      if (playlistData.items) {
-        const videos = playlistData.items.map(item => ({
-          id: item.contentDetails.videoId,
-          title: item.snippet.title,
-          description: item.snippet.description,
-          thumbnail: item.snippet.thumbnails.high?.url || 
-                     item.snippet.thumbnails.medium?.url || 
-                     item.snippet.thumbnails.default?.url,
-          publishedAt: item.snippet.publishedAt,
-          url: `https://www.youtube.com/watch?v=${item.contentDetails.videoId}`,
-          channelTitle: item.snippet.channelTitle
-        }));
-        
-        allVideos = allVideos.concat(videos);
-      }
-
-      nextPageToken = playlistData.nextPageToken || '';
-      pageCount++;
-      
-      // Safety limit: don't fetch more than 10 pages (500 videos)
-      if (pageCount >= 10) {
-        console.log('⚠️ Reached page limit (10 pages)');
-        break;
-      }
-      
-    } while (nextPageToken);
-
-    console.log(`✅ Fetched ${allVideos.length} videos in ${pageCount} API calls`);
+    // STEP 3: Optionally pre-fetch all playlists (commented out to save quota)
+    // Uncomment if you want all playlists cached on first load
+    /*
+    for (const [name, playlistId] of Object.entries(PLAYLISTS)) {
+      console.log(`🔄 Fetching playlist: ${name}`);
+      const playlistResult = await fetchPlaylistVideos(API_KEY, playlistId);
+      cache.playlists[name] = playlistResult.videos;
+      quotaUsed += playlistResult.quotaUsed;
+    }
+    */
 
     // Update cache
     cache.channelData = channelStats;
@@ -152,10 +180,11 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       cached: false,
-      quotaUsed: 1 + pageCount, // 1 for channel stats, pageCount for playlist items
+      quotaUsed,
       data: {
         channelStats,
-        videos: allVideos
+        videos: allVideos,
+        playlists: cache.playlists
       }
     });
 
@@ -167,6 +196,60 @@ export default async function handler(req, res) {
       error: error.message || 'Internal server error'
     });
   }
+}
+
+// Helper function to fetch all videos from a playlist
+async function fetchPlaylistVideos(API_KEY, playlistId) {
+  let allVideos = [];
+  let nextPageToken = '';
+  let pageCount = 0;
+
+  do {
+    const playlistUrl = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&playlistId=${playlistId}&maxResults=50&pageToken=${nextPageToken}&key=${API_KEY}`;
+    
+    const playlistResponse = await fetch(playlistUrl);
+    
+    if (!playlistResponse.ok) {
+      const errorText = await playlistResponse.text();
+      console.error('❌ Playlist API error:', playlistResponse.status, errorText);
+      throw new Error(`YouTube API error: ${playlistResponse.status}`);
+    }
+
+    const playlistData = await playlistResponse.json();
+    
+    if (playlistData.items) {
+      const videos = playlistData.items
+        .filter(item => item.snippet.title !== 'Private video' && item.snippet.title !== 'Deleted video')
+        .map(item => ({
+          id: item.contentDetails.videoId,
+          title: item.snippet.title,
+          description: item.snippet.description,
+          thumbnail: item.snippet.thumbnails.high?.url || 
+                     item.snippet.thumbnails.medium?.url || 
+                     item.snippet.thumbnails.default?.url,
+          publishedAt: item.snippet.publishedAt,
+          url: `https://www.youtube.com/watch?v=${item.contentDetails.videoId}`,
+          channelTitle: item.snippet.channelTitle
+        }));
+      
+      allVideos = allVideos.concat(videos);
+    }
+
+    nextPageToken = playlistData.nextPageToken || '';
+    pageCount++;
+    
+    // Safety limit: don't fetch more than 10 pages (500 videos)
+    if (pageCount >= 10) {
+      console.log('⚠️ Reached page limit (10 pages)');
+      break;
+    }
+    
+  } while (nextPageToken);
+
+  return {
+    videos: allVideos,
+    quotaUsed: pageCount
+  };
 }
 
 // Helper function to format large numbers
