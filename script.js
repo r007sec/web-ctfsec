@@ -2,13 +2,11 @@
 // YOUTUBE API CONFIGURATION
 // ===========================================
 const YOUTUBE_CONFIG = {
-    // Your API endpoint (update this to your Vercel deployment URL)
-    API_ENDPOINT: '/api/youtube', // This will be your Vercel function endpoint
+    API_ENDPOINT: '/api/youtube',
     CHANNEL_ID: 'UCMq4uUwcWnYgfe3z5w3Kt7A',
-    CACHE_DURATION: 600000, // Cache data for 10 minutes (600000ms)
-    USE_LIVE_API: true, // Set to false to use manual data instead
+    CACHE_DURATION: 600000,
+    USE_LIVE_API: true,
     
-    // Your YouTube Playlists (for filtering)
     PLAYLISTS: {
         'ad': 'PL-KySkbfyS663cCQlYn_ow4cHo62ZKlCC',
         'thm': 'PL-KySkbfyS64f7dhGoKMKP0YIT7H2tqpn',
@@ -18,7 +16,6 @@ const YOUTUBE_CONFIG = {
     }
 };
 
-// Manual fallback data (used if API fails or USE_LIVE_API is false)
 const FALLBACK_DATA = {
     subscribers: 3020,
     totalViews: 135181,
@@ -79,7 +76,7 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
 let youtubeDataCache = {
     channelData: null,
     allVideos: null,
-    playlistVideos: {},
+    playlists: {},
     timestamp: null
 };
 
@@ -93,12 +90,12 @@ function isCacheValid() {
 // FETCH DATA FROM SERVERLESS FUNCTION
 // ===========================================
 async function fetchYouTubeData() {
-    // Check local cache first
     if (youtubeDataCache.channelData && youtubeDataCache.allVideos && isCacheValid()) {
         console.log('✅ Using locally cached data');
         return {
             channelStats: youtubeDataCache.channelData,
-            videos: youtubeDataCache.allVideos
+            videos: youtubeDataCache.allVideos,
+            playlists: youtubeDataCache.playlists
         };
     }
 
@@ -106,7 +103,8 @@ async function fetchYouTubeData() {
         console.log('ℹ️ Live API disabled, using fallback data');
         return {
             channelStats: FALLBACK_DATA,
-            videos: []
+            videos: [],
+            playlists: {}
         };
     }
 
@@ -130,9 +128,9 @@ async function fetchYouTubeData() {
             console.log(`📊 Quota used: ${result.quotaUsed} units`);
         }
 
-        // Update local cache
         youtubeDataCache.channelData = result.data.channelStats;
         youtubeDataCache.allVideos = result.data.videos;
+        youtubeDataCache.playlists = result.data.playlists || {};
         youtubeDataCache.timestamp = Date.now();
 
         return result.data;
@@ -140,34 +138,32 @@ async function fetchYouTubeData() {
     } catch (error) {
         console.error('❌ Error fetching YouTube data:', error);
         
-        // Fall back to cached data if available
         if (youtubeDataCache.channelData && youtubeDataCache.allVideos) {
             console.log('⚠️ Using expired cache as fallback');
             return {
                 channelStats: youtubeDataCache.channelData,
-                videos: youtubeDataCache.allVideos
+                videos: youtubeDataCache.allVideos,
+                playlists: youtubeDataCache.playlists
             };
         }
         
-        // Ultimate fallback
         console.log('⚠️ Using hardcoded fallback data');
         return {
             channelStats: FALLBACK_DATA,
-            videos: []
+            videos: [],
+            playlists: {}
         };
     }
 }
 
 // ===========================================
-// FETCH VIDEOS FROM PLAYLIST (Client-side filtering)
+// FETCH SPECIFIC PLAYLIST
 // ===========================================
-async function fetchPlaylistVideos(playlistId) {
-    // Note: This is now just filtering the already-fetched videos
-    // You could enhance this to fetch specific playlists from the server if needed
-    
-    if (youtubeDataCache.playlistVideos[playlistId] && isCacheValid()) {
-        console.log(`✅ Using cached playlist data for ${playlistId}`);
-        return youtubeDataCache.playlistVideos[playlistId];
+async function fetchPlaylist(playlistName) {
+    // Check local cache first
+    if (youtubeDataCache.playlists[playlistName] && isCacheValid()) {
+        console.log(`✅ Using cached playlist: ${playlistName}`);
+        return youtubeDataCache.playlists[playlistName];
     }
 
     if (!YOUTUBE_CONFIG.USE_LIVE_API) {
@@ -175,46 +171,29 @@ async function fetchPlaylistVideos(playlistId) {
     }
 
     try {
-        console.log(`🔄 Filtering videos for playlist: ${playlistId}...`);
+        console.log(`🔄 Fetching playlist: ${playlistName}...`);
         
-        // For now, we'll fetch from the old method
-        // In production, you might want to add another serverless endpoint for specific playlists
-        const { API_KEY } = YOUTUBE_CONFIG;
-        let allVideos = [];
-        let nextPageToken = '';
-
-        do {
-            const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${playlistId}&maxResults=50&pageToken=${nextPageToken}&key=${API_KEY}`;
-            const response = await fetch(url);
-            
-            if (!response.ok) {
-                throw new Error(`API Error: ${response.status}`);
-            }
-
-            const data = await response.json();
-            
-            if (data.items) {
-                allVideos = allVideos.concat(data.items.map(item => ({
-                    id: item.snippet.resourceId.videoId,
-                    title: item.snippet.title,
-                    description: item.snippet.description,
-                    thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.medium?.url,
-                    publishedAt: item.snippet.publishedAt,
-                    url: `https://www.youtube.com/watch?v=${item.snippet.resourceId.videoId}`
-                })));
-            }
-
-            nextPageToken = data.nextPageToken || '';
-            
-        } while (nextPageToken);
-
-        youtubeDataCache.playlistVideos[playlistId] = allVideos;
+        const response = await fetch(`${YOUTUBE_CONFIG.API_ENDPOINT}?playlist=${playlistName}`);
         
-        console.log(`✅ Fetched ${allVideos.length} videos from playlist`);
-        return allVideos;
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.status}`);
+        }
+
+        const result = await response.json();
+        
+        if (!result.success) {
+            throw new Error(result.error || 'Unknown error from API');
+        }
+
+        console.log(`✅ Playlist "${playlistName}" fetched (${result.data.videos.length} videos)`);
+        
+        // Cache the playlist
+        youtubeDataCache.playlists[playlistName] = result.data.videos;
+        
+        return result.data.videos;
 
     } catch (error) {
-        console.error('❌ Error fetching playlist videos:', error);
+        console.error(`❌ Error fetching playlist ${playlistName}:`, error);
         return [];
     }
 }
@@ -239,18 +218,40 @@ async function updateStatsSection() {
         const data = await fetchYouTubeData();
         const stats = data.channelStats;
         
+        // Animated counter for stats
+        const animateCounter = (element, target) => {
+            if (!element) return;
+            const duration = 2000;
+            const start = 0;
+            const increment = target / (duration / 16);
+            let current = start;
+            
+            const timer = setInterval(() => {
+                current += increment;
+                if (current >= target) {
+                    element.textContent = formatNumber(target);
+                    clearInterval(timer);
+                } else {
+                    element.textContent = formatNumber(Math.floor(current));
+                }
+            }, 16);
+        };
+        
         const subscribersElem = document.getElementById('subscriberCount');
         const viewsElem = document.getElementById('viewCount');
         const videosElem = document.getElementById('videoCount');
         
         if (subscribersElem) {
-            subscribersElem.textContent = stats.subscriberDisplay || formatNumber(stats.subscribers);
+            subscribersElem.dataset.target = stats.subscribers;
+            animateCounter(subscribersElem, stats.subscribers);
         }
         if (viewsElem) {
-            viewsElem.textContent = stats.viewsDisplay || formatNumber(stats.totalViews);
+            viewsElem.dataset.target = stats.totalViews;
+            animateCounter(viewsElem, stats.totalViews);
         }
         if (videosElem) {
-            videosElem.textContent = stats.videoCount;
+            videosElem.dataset.target = stats.videoCount;
+            animateCounter(videosElem, stats.videoCount);
         }
         
         console.log('✅ Stats section updated');
@@ -266,15 +267,45 @@ async function updateYouTubeWidget() {
     try {
         const data = await fetchYouTubeData();
         const stats = data.channelStats;
+        const videos = data.videos;
         
-        const subscribersElem = document.querySelector('.channel-stats .stat-value');
-        const viewsElem = document.querySelectorAll('.channel-stats .stat-value')[1];
-        
-        if (subscribersElem) {
-            subscribersElem.textContent = stats.subscriberDisplay || formatNumber(stats.subscribers);
+        // Update latest video
+        const latestVideoElem = document.getElementById('latestVideo');
+        if (latestVideoElem && videos && videos.length > 0) {
+            const latestVideo = videos[0];
+            const publishDate = new Date(latestVideo.publishedAt);
+            const now = new Date();
+            const diffTime = Math.abs(now - publishDate);
+            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+            
+            let timeAgo;
+            if (diffDays === 0) {
+                timeAgo = 'Today';
+            } else if (diffDays === 1) {
+                timeAgo = 'Yesterday';
+            } else if (diffDays < 7) {
+                timeAgo = `${diffDays} days ago`;
+            } else if (diffDays < 30) {
+                const weeks = Math.floor(diffDays / 7);
+                timeAgo = `${weeks} week${weeks > 1 ? 's' : ''} ago`;
+            } else {
+                const months = Math.floor(diffDays / 30);
+                timeAgo = `${months} month${months > 1 ? 's' : ''} ago`;
+            }
+            
+            latestVideoElem.textContent = timeAgo;
         }
-        if (viewsElem) {
-            viewsElem.textContent = stats.viewsDisplay || formatNumber(stats.totalViews);
+        
+        // Update live subscribers
+        const liveSubsElem = document.getElementById('liveSubscribers');
+        if (liveSubsElem) {
+            liveSubsElem.textContent = stats.subscriberDisplay || formatNumber(stats.subscribers);
+        }
+        
+        // Update total videos
+        const liveTotalVideosElem = document.getElementById('liveTotalVideos');
+        if (liveTotalVideosElem) {
+            liveTotalVideosElem.textContent = stats.videoCount;
         }
         
         console.log('✅ YouTube widget updated');
@@ -308,7 +339,7 @@ function createVideoCard(video) {
     article.innerHTML = `
         <a href="${video.url}" target="_blank">
             <div class="video-thumbnail">
-                <img src="${video.thumbnail}" alt="${video.title}">
+                <img src="${video.thumbnail}" alt="${video.title}" loading="lazy">
                 <div class="play-overlay"></div>
             </div>
         </a>
@@ -337,11 +368,17 @@ function displayVideos(videos, append = false) {
     const endIndex = startIndex + (videoDisplayState.displayedCount === 0 ? videoDisplayState.initialLoad : videoDisplayState.loadMoreIncrement);
     const videosToShow = videos.slice(startIndex, endIndex);
     
+    if (videosToShow.length === 0 && !append) {
+        videoGrid.innerHTML = '<p style="text-align: center; color: var(--text-muted); grid-column: 1/-1; padding: 3rem;">No videos found in this category.</p>';
+        updateLoadMoreButton(0);
+        updateResultsCount(0);
+        return;
+    }
+    
     videosToShow.forEach((video, index) => {
         const card = createVideoCard(video);
         videoGrid.appendChild(card);
         
-        // Animate in
         setTimeout(() => {
             card.style.transition = `all 0.6s ease ${index * 0.1}s`;
             card.style.opacity = '1';
@@ -378,7 +415,7 @@ function updateResultsCount(totalVideos) {
     const resultsCount = document.getElementById('resultsCount');
     if (!resultsCount) return;
     
-    resultsCount.textContent = `Showing ${videoDisplayState.displayedCount} of ${totalVideos} tutorials`;
+    resultsCount.textContent = `Showing ${Math.min(videoDisplayState.displayedCount, totalVideos)} of ${totalVideos} tutorials`;
 }
 
 // ===========================================
@@ -407,8 +444,8 @@ async function initializeVideoGrid() {
         return;
     }
     
-    videoDisplayState.allVideos = shuffleArray(allVideos);
-    videoDisplayState.currentVideos = videoDisplayState.allVideos;
+    videoDisplayState.allVideos = allVideos;
+    videoDisplayState.currentVideos = allVideos;
     displayVideos(videoDisplayState.currentVideos, false);
     
     console.log(`✅ Video grid initialized with ${allVideos.length} videos`);
@@ -432,8 +469,11 @@ const filterButtons = document.querySelectorAll('.filter-btn');
 
 filterButtons.forEach(button => {
     button.addEventListener('click', async () => {
+        // Visual feedback
         filterButtons.forEach(btn => btn.classList.remove('active'));
         button.classList.add('active');
+        button.disabled = true;
+        button.textContent = 'Loading...';
         
         const filter = button.dataset.filter;
         videoDisplayState.currentFilter = filter;
@@ -441,21 +481,36 @@ filterButtons.forEach(button => {
         
         console.log(`🎯 Filter clicked: ${filter}`);
         
-        if (filter === 'all') {
-            videoDisplayState.currentVideos = shuffleArray(videoDisplayState.allVideos);
-            displayVideos(videoDisplayState.currentVideos, false);
-        } else {
-            const playlistId = YOUTUBE_CONFIG.PLAYLISTS[filter];
-            if (playlistId) {
-                const playlistVideos = await fetchPlaylistVideos(playlistId);
-                videoDisplayState.currentVideos = shuffleArray(playlistVideos);
-                displayVideos(videoDisplayState.currentVideos, false);
+        try {
+            if (filter === 'all') {
+                videoDisplayState.currentVideos = videoDisplayState.allVideos;
+            } else {
+                // Fetch the specific playlist
+                const playlistVideos = await fetchPlaylist(filter);
+                videoDisplayState.currentVideos = playlistVideos;
+                console.log(`📊 Loaded ${playlistVideos.length} videos for playlist: ${filter}`);
             }
+            
+            displayVideos(videoDisplayState.currentVideos, false);
+            
+        } catch (error) {
+            console.error(`❌ Error loading playlist ${filter}:`, error);
+            videoDisplayState.currentVideos = [];
+            displayVideos([], false);
+        } finally {
+            // Restore button
+            button.disabled = false;
+            button.textContent = button.dataset.originalText || filter.toUpperCase();
         }
         
         const searchInput = document.getElementById('searchInput');
         if (searchInput) searchInput.value = '';
     });
+    
+    // Store original button text
+    if (!button.dataset.originalText) {
+        button.dataset.originalText = button.textContent;
+    }
 });
 
 // ===========================================
@@ -477,12 +532,6 @@ if (searchInput) {
             displayVideos(filtered, false);
             
             // Show all filtered results
-            const videoGrid = document.querySelector('.video-grid');
-            const allCards = videoGrid.querySelectorAll('.video-card');
-            allCards.forEach(card => {
-                card.style.display = 'block';
-            });
-            
             updateLoadMoreButton(0);
             updateResultsCount(filtered.length);
             
@@ -497,9 +546,18 @@ if (searchInput) {
 // ===========================================
 // INITIALIZE EVERYTHING
 // ===========================================
-updateStatsSection();
-updateYouTubeWidget();
-initializeVideoGrid();
+async function initializeApp() {
+    console.log('🚀 Initializing app...');
+    
+    await updateStatsSection();
+    await updateYouTubeWidget();
+    await initializeVideoGrid();
+    
+    console.log('✅ App initialized successfully');
+}
+
+// Start the app
+initializeApp();
 
 // Refresh stats every cache duration
 setInterval(() => {
